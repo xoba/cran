@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"flag"
 	"fmt"
@@ -37,13 +38,14 @@ actually installed.
 
 `)
 	}
-	var mirror, packages string
+	var mirror, packages, save string
 	var port int
 	var reload bool
 	flag.StringVar(&mirror, "mirror", "cran.r-project.org", "the cran mirror's domain name")
 	flag.StringVar(&packages, "packages", "latest", `the packages text file path ("latest" means last one in `+packagesDir+` dir)`)
 	flag.IntVar(&port, "port", 80, "the port to run http server on; 0 chooses a random one")
 	flag.BoolVar(&reload, "reload", false, "whether to load a new PACKAGES.gz from mirror")
+	flag.StringVar(&save, "save", "", "directory to save tar.gz's to, if any")
 	flag.Parse()
 	PlatformInit()
 	switch {
@@ -85,6 +87,7 @@ actually installed.
 	self := fmt.Sprintf("http://%v", ln.Addr())
 	log.Printf("running at %s with %s and mirror %s", self, packages, mirror)
 	h := server{
+		save:     save,
 		self:     self,
 		packages: packages,
 		mirror:   mirror,
@@ -108,6 +111,7 @@ func newLocalListener(port int) (net.Listener, error) {
 }
 
 type server struct {
+	save     string
 	self     string
 	packages string
 	mirror   string
@@ -196,7 +200,25 @@ if (!is.installed("{{.}}")) { quit(save='no',status=1) }
 				return fmt.Errorf("bad status: %s", resp.Status)
 			}
 			w.Header().Set("Content-Length", r.Header.Get("Content-Length"))
-			_, err = io.Copy(w, resp.Body)
+			var out io.Writer
+			buf := new(bytes.Buffer)
+			if len(h.save) > 0 {
+				out = io.MultiWriter(w, buf)
+			} else {
+				out = w
+			}
+			_, err = io.Copy(out, resp.Body)
+			if len(h.save) > 0 {
+				log.Printf("saving %s", filepath.Join(h.save, requestURI))
+				target := filepath.Join(h.save, requestURI)
+				os.MkdirAll(filepath.Dir(target), os.ModePerm)
+				tmp := filepath.Join(h.save, fmt.Sprintf("%d", rand.Int()))
+				if err := ioutil.WriteFile(tmp, buf.Bytes(), os.ModePerm); err != nil {
+					return fmt.Errorf("oops, can't save: %v", err)
+				} else {
+					return os.Rename(tmp, target)
+				}
+			}
 			return err
 		}
 		if err := proxy(r.RequestURI); err != nil {
